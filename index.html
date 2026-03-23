@@ -272,7 +272,7 @@ header{background:var(--surface);border-bottom:1px solid var(--border);
   <button class="btn btn-cfg" onclick="openCfg()">⚙ Convés</button>
   <button class="btn btn-cfg" id="btnUndo" onclick="undo()" title="Desfazer (Ctrl+Z)">↩ Desfazer</button>
   <button class="btn btn-draw" id="btnDraw" onclick="toggleDrawMode()">⬛ Área Auto</button>
-  <button class="btn btn-up"  onclick="openUpload()">↑ Manifesto</button>
+  <button class="btn btn-up"  onclick="openUploadTracked('header')">↑ Manifesto</button>
   <button class="btn btn-pdf" onclick="openExport()">⬇ Exportar PDF</button>
   <button class="btn btn-clear" onclick="clearDeck()">⟳ Limpar</button>
 </header>
@@ -284,7 +284,7 @@ header{background:var(--surface);border-bottom:1px solid var(--border);
     <div class="clist" id="clist">
       <div class="empty-state"><div class="ei">📋</div>
         <p>Faça upload do manifesto PDF para carregar as cargas automaticamente</p>
-        <button class="btn btn-up" style="margin-top:12px;width:100%;" onclick="openUpload()">↑ Carregar Manifesto</button>
+        <button class="btn btn-up" style="margin-top:12px;width:100%;" onclick="openUploadTracked('sidebar')">↑ Carregar Manifesto</button>
       </div>
     </div>
   </div>
@@ -3975,7 +3975,8 @@ function applyCfg(){
   if(isNaN(L)||L<5||isNaN(W)||W<2||isNaN(N)||N<1||isNaN(areaMaxIlha)||areaMaxIlha<=0||isNaN(espacoMinIlhas)||espacoMinIlhas<0) return;
   CFG={L,W,N,baiaDir:pendingBaiaDir,pesoM2,areaMaxIlha,espacoMinIlhas};
   const bm=(L/N).toFixed(2);
-  document.getElementById('deckDesc').textContent=`CONVÉS PRINCIPAL · ${L} m × ${W} m · ${N} BAIAS`;
+  const deckDescEl=document.getElementById('deckDesc');
+  if(deckDescEl) deckDescEl.textContent=`CONVÉS PRINCIPAL · ${L} m × ${W} m · ${N} BAIAS`;
   document.getElementById('deckTitle').textContent=`CONVÉS PRINCIPAL — ${L} m × ${W} m — ${N} BAIAS DE ${bm} m`;
   document.getElementById('sDeckArea').textContent=(L*W).toFixed(1)+' m²';
   placed={}; closeCfg(); buildSidebar(); buildDeck();
@@ -3992,6 +3993,16 @@ function openExport(){
 function closeExport(){document.getElementById('exportModal').classList.add('hidden');}
 
 function generatePDF(){
+
+  const nomeDoNavio = (document.getElementById('expNavio')?.value || 'Navio Nao Identificado').trim() || 'Navio Nao Identificado';
+
+  gtag('event', 'gerar_pdf_plano', {
+    'button_name': 'Gerar PDF',
+    'tipo': 'plano_carga',
+    'nome_da_embarcacao': nomeDoNavio,
+    'file_name': 'plano_' + nomeDoNavio.replace(/\s+/g, '_').toLowerCase()
+  });
+
   try {
   const atend=document.getElementById('expAtend').value||'—';
   const navio=document.getElementById('expNavio').value||'—';
@@ -4532,6 +4543,14 @@ function clearDeck(){placed={};buildSidebar();buildDeck();}
 function setLog(msg){document.getElementById('parseLog').textContent=msg;}
 
 // ── UPLOAD ────────────────────────────────────────────────────────
+function openUploadTracked(origem){
+  gtag('event', 'abrir_manifesto', {
+    'button_name': 'Upload Manifesto',
+    'origem': origem
+  });
+  openUpload();
+}
+
 function openUpload(){document.getElementById('uploadModal').classList.remove('hidden');}
 function closeUpload(){document.getElementById('uploadModal').classList.add('hidden');}
 function setMSt(msg,type){const el=document.getElementById('modalStatus');el.textContent=msg;el.className='modal-status '+(type||'');}
