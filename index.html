@@ -210,7 +210,7 @@ header{background:var(--surface);border-bottom:1px solid var(--border);
 .modal-drop .mdi{font-size:30px;margin-bottom:6px;}
 .modal-drop p{font-size:12px;color:var(--muted);margin:0;}
 .modal-drop p b{color:var(--accent);}
-.modal-status{font-size:11px;min-height:18px;margin-bottom:10px;font-family:'Roboto Mono',monospace;}
+.modal-status{font-size:11px;min-height:18px;margin-bottom:10px;font-family:'Roboto Mono',monospace;line-height:1.7;}
 .modal-status.ok{color:#27c93f;}.modal-status.err{color:#e05050;}.modal-status.loading{color:var(--accent);}
 .modal-close{font-size:11px;color:var(--muted);cursor:pointer;text-decoration:underline;}
 .modal-close:hover{color:var(--text);}
@@ -4378,6 +4378,7 @@ function _flushPending(pending, currentDest, cargos, idN){
   const dims = [pending.d0, pending.d1].sort((a,b)=>b-a);
   cargos.push({
     id:'c'+(idN++), dest:currentDest, destLabel:currentDest,
+    itemNum: pending.itemNum || null,
     desc: pending.desc.substring(0,55),
     l: parseFloat(Math.min(dims[0],CFG.L).toFixed(2)),
     w: parseFloat(Math.min(dims[1],CFG.W).toFixed(2)),
@@ -4386,28 +4387,127 @@ function _flushPending(pending, currentDest, cargos, idN){
   return idN;
 }
 
-async function parseManifestPDF(file){
-  setLog('Lendo PDF...');
-  const buf = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({data:buf}).promise;
-  setLog(`PDF lido: ${pdf.numPages} págs. Parseando...`);
 
+let LAST_ROUTE_TEXT = '';
+let LAST_ROUTE_ORIGIN = '';
+
+function _rowToText(row){
+  return row.items.map(i => (i.str || '').trim()).filter(Boolean).join(' ').replace(/\s+/g,' ').trim();
+}
+function _normalizeCode(s){
+  return (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().trim();
+}
+function _extractRouteInfoFromLines(lines){
+  for(const line of lines){
+    const m = line.match(/Roteiro\s+previsto\s+(.+)$/i);
+    if(m){
+      const raw = m[1].trim().replace(/\s+/g,' ');
+      const parts = raw.split(/\s*->\s*/).map(s=>s.trim()).filter(Boolean);
+      return {text: raw, origin: parts[0] ? _normalizeCode(parts[0]) : ''};
+    }
+  }
+  return {text:'', origin:''};
+}
+function _isCargoLineText(line){
+  return /^\d{10}\b/.test(line || '');
+}
+function _inferDescFromPreDim(pre){
+  let s = (pre || '').replace(/^\d{10}\s+/, '').trim();
+  if(!s) return '';
+  const toks = s.split(/\s+/).filter(Boolean);
+  while(toks.length > 2){
+    const last = toks[toks.length - 1];
+    if(/^[\d.,\/-]+$/.test(last) || (/[A-Z]/i.test(last) && /\d/.test(last) && last.length >= 5)){
+      toks.pop();
+      continue;
+    }
+    break;
+  }
+  return toks.join(' ').trim() || s;
+}
+function _pushCargoText(cargos, idN, dest, line){
+  const dm = line.match(/(\d+(?:[.,]\d+)?)[xX×](\d+(?:[.,]\d+)?)[xX×](\d+(?:[.,]\d+)?)/);
+  if(!dm) return idN;
+  const beforeDim = line.slice(0, dm.index).trim();
+  const afterDim  = line.slice(dm.index + dm[0].length).trim();
+  const pesoMatch = afterDim.match(/\b\d[\d.,]*\b/);
+  // Accept missing weight (broken line / separate row) — store as 0 rather than discard.
+  const peso = pesoMatch ? _parsePeso(pesoMatch[0]) : 0;
+  if(isNaN(peso) || peso < 0) return idN;
+  const d0 = _toF(dm[1]), d1 = _toF(dm[2]);
+  const dims = [d0, d1].sort((a,b)=>b-a);
+  const desc = _inferDescFromPreDim(beforeDim).substring(0, 55) || 'CARGA';
+  // Extract the 10-digit item number from the start of the line (unique manifest ID)
+  const itemNumMatch = line.match(/^(\d{10})\b/);
+  const itemNum = itemNumMatch ? itemNumMatch[1] : null;
+  const id = 'c' + (idN++);
+  cargos.push({
+    id,
+    itemNum,
+    dest,
+    destLabel: dest,
+    desc,
+    l: parseFloat(Math.min(dims[0], CFG.L).toFixed(2)),
+    w: parseFloat(Math.min(dims[1], CFG.W).toFixed(2)),
+    kg: peso
+  });
+  return idN;
+}
+function _parseManifestTextRows(pageRows){
+  const allLines = [];
+  for(const rows of pageRows){
+    for(const row of rows){
+      const line = _rowToText(row);
+      if(line) allLines.push(line);
+    }
+  }
+
+  const routeInfo = _extractRouteInfoFromLines(allLines);
+  if(routeInfo.text) LAST_ROUTE_TEXT = routeInfo.text;
+  if(routeInfo.origin) LAST_ROUTE_ORIGIN = routeInfo.origin;
+
+  const cargos = [];
+  let idN = 1;
+  let currentOrig = '';
+  let currentDest = '';
+
+  for(const rawLine of allLines){
+    const line = rawLine.replace(/\s+/g,' ').trim();
+    if(!line) continue;
+
+    const sec = line.match(/^([A-Z0-9-]+)\s+([A-Z0-9-]+)\s+Total itens:?$/i);
+    if(sec){
+      currentOrig = _normalizeCode(sec[1]);
+      currentDest = _normalizeCode(sec[2]);
+      continue;
+    }
+
+    if(!_isCargoLineText(line)) continue;
+    if(!currentOrig || !currentDest) continue;
+    if(routeInfo.origin && currentOrig !== routeInfo.origin) continue;
+
+    idN = _pushCargoText(cargos, idN, currentDest, line);
+  }
+
+  // Deduplicate only across pages: same manifest item number + dest is the true duplicate.
+  // If no itemNum available, fall back to id (already unique per parse run).
+  const uniq = new Map();
+  for(const c of cargos){
+    const k = c.itemNum ? [c.dest, c.itemNum].join('|') : c.id;
+    if(!uniq.has(k)) uniq.set(k, c);
+  }
+  return [...uniq.values()];
+}
+function _parseManifestLegacyRows(pageRows){
   let cargos = [], idN = 1;
   let currentDest = null, inReturn = false, pending = null;
-  let pageBase = null; // base name extracted from each page header
+  let pageBase = null;
 
-  for(let p = 1; p <= pdf.numPages; p++){
-    const page    = await pdf.getPage(p);
-    const content = await page.getTextContent();
-
-    const rows = _groupRows(content.items, 3);
-
-    // Extract base name from this page's header (e.g. "PBG", "PACU", "PDOCAS")
+  for(const rows of pageRows){
     const thisBase = _extractBase(rows);
     if(thisBase) pageBase = thisBase;
     const base = pageBase || 'PBG';
 
-    // Detect dim/peso column positions from actual data on this page
     const dimX   = _detectDimX(rows);
     const dimXlo = dimX - 18, dimXhi = dimX + 18;
     const pesoXlo = dimX + 40, pesoXhi = dimX + 140;
@@ -4420,9 +4520,6 @@ async function parseManifestPDF(file){
 
       if(!words.length) continue;
 
-      // ── Detect section header ──
-      // Pattern: a "base" word near x≈28 on the left, a platform code near x≈311 on the right
-      // Both at the same Y (top≈171 in these PDFs)
       const leftWord  = words.find(w => w.x < 150);
       const rightWord = words.find(w => w.x >= 290 && w.x <= 340);
 
@@ -4430,12 +4527,10 @@ async function parseManifestPDF(file){
         const lText = leftWord.text.toUpperCase();
         const rCode = _findPlatformCode(rightWord.text);
 
-        // Forward: base on left, platform on right
         if((lText === base || lText.includes(base)) && rCode && rCode !== base){
           idN = _flushPending(pending, currentDest, cargos, idN); pending = null;
           currentDest = rCode; inReturn = false; continue;
         }
-        // Return: platform on left, base on right
         const lCode = _findPlatformCode(leftWord.text);
         const rText = rightWord.text.toUpperCase();
         if(lCode && lCode !== base && (rText === base || rText.includes(base))){
@@ -4444,8 +4539,6 @@ async function parseManifestPDF(file){
         }
       }
 
-      // Legacy PBG-style detection (two-column PDF layout with wider zones)
-      // This handles old manifests where base is x<260 and dest is x>=265
       if(!leftWord || leftWord.x >= 150){
         const origWords = words.filter(w => w.x < 260);
         const destWords = words.filter(w => w.x >= 265);
@@ -4467,33 +4560,28 @@ async function parseManifestPDF(file){
 
       if(!currentDest || inReturn) continue;
 
-      // ── Cargo row: has dimension token near dimX column ──
       const dimWord = words.find(w => w.x > dimXlo && w.x < dimXhi && _dimRE.test(w.text));
-
       if(dimWord){
         idN = _flushPending(pending, currentDest, cargos, idN); pending = null;
-
         const dm = dimWord.text.match(_dimRE);
         const d0 = _toF(dm[1]), d1 = _toF(dm[2]);
-
-        // Peso: first numeric token to the right of dim column
         const pesoWord = words.find(w => w.x > pesoXlo && w.x < pesoXhi && /^[\d.,]+$/.test(w.text));
-        if(!pesoWord) continue;
-        const peso = _parsePeso(pesoWord.text);
-        if(isNaN(peso) || peso < 10) continue;
+        // Accept missing weight — store as 0 rather than skip the cargo entirely.
+        const peso = pesoWord ? _parsePeso(pesoWord.text) : 0;
+        if(isNaN(peso) || peso < 0) continue;
 
-        // Description: tokens between x≈200 and dimX
-        let descWords = words.filter(w => w.x >= 195 && w.x < dimXlo);
+        let descWords = words.filter(w => w.x >= 120 && w.x < dimXlo);
         const unIdx = descWords.findIndex(w => w.text === 'UN');
         if(unIdx >= 0) descWords = descWords.slice(unIdx + 1);
         descWords = descWords.filter(w => !/^\d{4}\/\d{4}$/.test(w.text));
         const descHere = descWords.map(w=>w.text).join(' ').trim();
 
-        pending = {d0, d1, peso, y, desc: descHere};
+        // Extract 10-digit manifest item number from the leftmost word of the row
+        const itemNumWord = words.find(w => w.x < 120 && /^\d{10}$/.test(w.text));
+        pending = {d0, d1, peso, y, desc: descHere, itemNum: itemNumWord ? itemNumWord.text : null};
         continue;
       }
 
-      // ── Continuation row: description line below pending ──
       if(pending){
         const gap = pending.y - y;
         if(gap >= -1 && gap <= 22){
@@ -4514,6 +4602,7 @@ async function parseManifestPDF(file){
             const dims = [pending.d0, pending.d1].sort((a,b)=>b-a);
             cargos.push({
               id:'c'+(idN++), dest:currentDest, destLabel:currentDest,
+              itemNum: pending.itemNum || null,
               desc: desc.substring(0,55),
               l: parseFloat(Math.min(dims[0],CFG.L).toFixed(2)),
               w: parseFloat(Math.min(dims[1],CFG.W).toFixed(2)),
@@ -4526,16 +4615,46 @@ async function parseManifestPDF(file){
         }
       }
     }
-
-    // Flush leftover at page end
     idN = _flushPending(pending, currentDest, cargos, idN); pending = null;
   }
 
+  // Deduplicate only across pages: same manifest item number + dest is the true duplicate.
+  // If no itemNum available, fall back to id (already unique per parse run).
+  const uniq = new Map();
+  for(const c of cargos){
+    const k = c.itemNum ? [c.dest, c.itemNum].join('|') : c.id;
+    if(!uniq.has(k)) uniq.set(k, c);
+  }
+  return [...uniq.values()];
+}
+async function parseManifestPDF(file){
+  setLog('Lendo PDF...');
+  const buf = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+  setLog(`PDF lido: ${pdf.numPages} págs. Parseando...`);
+
+  LAST_ROUTE_TEXT = '';
+  LAST_ROUTE_ORIGIN = '';
+  const pageRows = [];
+  for(let p = 1; p <= pdf.numPages; p++){
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    pageRows.push(_groupRows(content.items, 3));
+  }
+
+  const cargosText = _parseManifestTextRows(pageRows);
+  const cargosLegacy = _parseManifestLegacyRows(pageRows);
+  // Prefer text parser; only fall back to legacy if it finds >10% more items.
+  // "More items" alone is not reliable — legacy can produce dirty/misassigned entries.
+  const cargos = (cargosLegacy.length > cargosText.length * 1.10) ? cargosLegacy : cargosText;
+
   const counts = cargos.reduce((a,c)=>{a[c.dest]=(a[c.dest]||0)+1;return a;},{});
   const summary = Object.entries(counts).map(([k,v])=>`${k}:${v}`).join(' · ');
-  setLog(`✓ ${cargos.length} cargas · ${summary}`);
+  const mode = cargos === cargosText ? 'texto' : 'coordenadas';
+  setLog(`✓ ${cargos.length} cargas · ${summary} · parser: ${mode} (${cargosText.length}/${cargosLegacy.length})`);
   return cargos;
 }
+
 // ── CONTROLS ─────────────────────────────────────────────────────
 function setFil(f,btn){filterDest=f;document.querySelectorAll('.fb').forEach(b=>b.classList.remove('active'));btn.classList.add('active');buildSidebar();}
 function toggleVis(){return;}
@@ -4553,24 +4672,52 @@ function openUploadTracked(origem){
 
 function openUpload(){document.getElementById('uploadModal').classList.remove('hidden');}
 function closeUpload(){document.getElementById('uploadModal').classList.add('hidden');}
-function setMSt(msg,type){const el=document.getElementById('modalStatus');el.textContent=msg;el.className='modal-status '+(type||'');}
+function setMSt(msg,type,html){const el=document.getElementById('modalStatus');if(html)el.innerHTML=msg;else el.textContent=msg;el.className='modal-status '+(type||'');}
 
 document.getElementById('fileInput').addEventListener('change', async function(){
   const file=this.files[0]; if(!file) return;
   setMSt('⏳ Processando PDF...','loading');
   try{
     const cargos=await parseManifestPDF(file);
-    if(cargos.length===0){setMSt('⚠ Nenhuma carga encontrada.','err');return;}
+    if(cargos.length===0){
+      const emailSubject = encodeURIComponent('Manifesto não reconhecido pelo Plano de Carga');
+      const emailBody = encodeURIComponent('Olá,\n\nO manifesto abaixo não foi reconhecido pelo sistema. Por favor, analise:\n\nArquivo: ' + file.name);
+      const mailto = 'mailto:vapozeiro@outlook.com.br?subject=' + emailSubject + '&body=' + emailBody;
+      setMSt(
+        '⚠ Nenhuma carga encontrada.<br><br>' +
+        'Pedimos desculpas pelo transtorno.<br>' +
+        'Por favor, envie o manifesto para<br>' +
+        '<a href="' + mailto + '" style="color:#ff9944;text-decoration:underline;">vapozeiro@outlook.com.br</a><br>' +
+        'para que possamos aprimorar o programa.',
+        'err', true
+      );
+      return;
+    }
     CARGOS=cargos; placed={}; buildDestMap(cargos);
     setMSt(`✓ ${cargos.length} cargas carregadas!`,'ok');
     const labels=[...new Set(cargos.map(c=>getLabel(c.dest)))];
-    document.getElementById('routePill').innerHTML='PBG → <b>'+labels.join(' → ')+'</b> → PBG';
+    document.getElementById('routePill').innerHTML = LAST_ROUTE_TEXT
+      ? ('<b>' + LAST_ROUTE_TEXT + '</b>')
+      : ((LAST_ROUTE_ORIGIN || 'BASE') + ' → <b>' + labels.join(' → ') + '</b>');
     // Pre-fill export fields from PDF name if possible
     const name=file.name;
     const atm=name.match(/(\d{9})/); if(atm) document.getElementById('expAtend').value=atm[1];
     const nm=name.match(/STARNAV[_\s](\w+)/i); if(nm) document.getElementById('expNavio').value='STARNAV '+nm[1];
     setTimeout(()=>{closeUpload();buildDynamicUI();buildSidebar();buildDeck();},900);
-  }catch(err){setMSt('✗ Erro: '+err.message,'err');console.error(err);}
+  }catch(err){
+    const emailSubject = encodeURIComponent('Erro ao processar manifesto');
+    const emailBody = encodeURIComponent('Olá,\n\nOcorreu o seguinte erro ao processar o manifesto:\n\n' + err.message + '\n\nArquivo: ' + file.name);
+    const mailto = 'mailto:vapozeiro@outlook.com.br?subject=' + emailSubject + '&body=' + emailBody;
+    setMSt(
+      '✗ Erro ao processar o PDF.<br><br>' +
+      'Pedimos desculpas pelo transtorno.<br>' +
+      'Por favor, envie o manifesto para<br>' +
+      '<a href="' + mailto + '" style="color:#ff9944;text-decoration:underline;">vapozeiro@outlook.com.br</a><br>' +
+      'para que possamos aprimorar o programa.',
+      'err', true
+    );
+    console.error(err);
+  }
 });
 
 const mDrop=document.getElementById('modalDrop');
