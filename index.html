@@ -4390,6 +4390,7 @@ function _flushPending(pending, currentDest, cargos, idN){
 
 let LAST_ROUTE_TEXT = '';
 let LAST_ROUTE_ORIGIN = '';
+let LAST_ATENDIMENTO = '';
 
 function _rowToText(row){
   return row.items.map(i => (i.str || '').trim()).filter(Boolean).join(' ').replace(/\s+/g,' ').trim();
@@ -4407,6 +4408,22 @@ function _extractRouteInfoFromLines(lines){
     }
   }
   return {text:'', origin:''};
+}
+function _extractAtendimentoFromLines(lines){
+  const patterns = [
+    /ATENDIMENTO\s+MARITIMO\s*-\s*MULTI-?PARADAS:\s*(\d{9,10})\b/i,
+    /EMPRESA\s+ATENDIMENTO:\s*(\d{9,10})\b/i,
+    /ATENDIMENTO:\s*(\d{9,10})\b/i
+  ];
+
+  for(const line of lines){
+    for(const pattern of patterns){
+      const match = line.match(pattern);
+      if(match) return match[1];
+    }
+  }
+
+  return '';
 }
 function _isCargoLineText(line){
   return /^\d{10}\b/.test(line || '');
@@ -4465,6 +4482,7 @@ function _parseManifestTextRows(pageRows){
   const routeInfo = _extractRouteInfoFromLines(allLines);
   if(routeInfo.text) LAST_ROUTE_TEXT = routeInfo.text;
   if(routeInfo.origin) LAST_ROUTE_ORIGIN = routeInfo.origin;
+  LAST_ATENDIMENTO = _extractAtendimentoFromLines(allLines);
 
   const cargos = [];
   let idN = 1;
@@ -4635,6 +4653,7 @@ async function parseManifestPDF(file){
 
   LAST_ROUTE_TEXT = '';
   LAST_ROUTE_ORIGIN = '';
+  LAST_ATENDIMENTO = '';
   const pageRows = [];
   for(let p = 1; p <= pdf.numPages; p++){
     const page = await pdf.getPage(p);
@@ -4699,9 +4718,12 @@ document.getElementById('fileInput').addEventListener('change', async function()
     document.getElementById('routePill').innerHTML = LAST_ROUTE_TEXT
       ? ('<b>' + LAST_ROUTE_TEXT + '</b>')
       : ((LAST_ROUTE_ORIGIN || 'BASE') + ' → <b>' + labels.join(' → ') + '</b>');
-    // Pre-fill export fields from PDF name if possible
+    // Pre-fill export fields from parsed PDF / file name if possible
     const name=file.name;
-    const atm=name.match(/(\d{9})/); if(atm) document.getElementById('expAtend').value=atm[1];
+    if(LAST_ATENDIMENTO) document.getElementById('expAtend').value=LAST_ATENDIMENTO;
+    else {
+      const atm=name.match(/(\d{9,10})/); if(atm) document.getElementById('expAtend').value=atm[1];
+    }
     const nm=name.match(/STARNAV[_\s](\w+)/i); if(nm) document.getElementById('expNavio').value='STARNAV '+nm[1];
     setTimeout(()=>{closeUpload();buildDynamicUI();buildSidebar();buildDeck();},900);
   }catch(err){
